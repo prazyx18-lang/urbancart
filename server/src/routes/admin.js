@@ -1,12 +1,14 @@
 const express = require('express');
 const { query, transaction } = require('../config/db');
 const { requireAdmin } = require('../middleware/auth');
-const { productImage, UPLOAD_DIR } = require('../middleware/upload');
+const { productImage } = require('../middleware/upload');
 const { validateProduct, toPositiveInt } = require('../utils/validate');
 const { slugify } = require('../utils/slug');
 const { HttpError } = require('../utils/errors');
-const fs = require('fs');
-const path = require('path');
+const {
+  uploadImage,
+  deleteImageByUrl,
+} = require('../config/cloudinary');
 
 const router = express.Router();
 router.use(requireAdmin);
@@ -110,46 +112,92 @@ router.delete('/products/:id', async (req, res) => {
   }
   const images = await query('SELECT image_url FROM product_images WHERE product_id = ?', [id]);
   await query('DELETE FROM products WHERE id = ?', [id]);
-  for (const img of images) removeUpload(img.image_url);
+for (const img of images) {
+  await deleteImageByUrl(img.image_url);
+}
   res.json({ ok: true, archived: false });
 });
 
+
 router.post('/products/:id/images', (req, res, next) => {
   productImage(req, res, async (err) => {
+    let uploadedUrl = null;
+
     try {
       if (err) return next(err);
-      if (!req.file) throw new HttpError(422, 'Choose an image to upload');
+
+      if (!req.file) {
+        throw new HttpError(422, 'Choose an image to upload');
+      }
+
       const id = Number(req.params.id);
-      const [exists] = await query('SELECT id FROM products WHERE id = ?', [id]);
+
+      const [exists] = await query(
+        'SELECT id FROM products WHERE id = ?',
+        [id]
+      );
+
       if (!exists) {
-        removeUpload('/uploads/' + req.file.filename);
         throw new HttpError(404, 'Product not found');
       }
+
+      const uploaded = await uploadImage(req.file.buffer);
+      uploadedUrl = uploaded.secure_url;
+
       const [{ next_order }] = await query(
-        'SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM product_images WHERE product_id = ?', [id]);
-      const url = `/uploads/${req.file.filename}`;
-      const result = await query('INSERT INTO product_images (product_id, image_url, sort_order) VALUES (?, ?, ?)',
-        [id, url, next_order]);
-      res.status(201).json({ id: result.insertId, imageUrl: url });
+        `SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order
+         FROM product_images WHERE product_id = ?`,
+        [id]
+      );
+
+      const result = await query(
+        `INSERT INTO product_images
+         (product_id, image_url, sort_order)
+         VALUES (?, ?, ?)`,
+        [id, uploadedUrl, next_order]
+      );
+
+      res.status(201).json({
+        id: result.insertId,
+        imageUrl: uploadedUrl,
+      });
+
     } catch (e) {
+      if (uploadedUrl) {
+        try {
+          await deleteImageByUrl(uploadedUrl);
+        } catch (deleteError) {
+          console.error('Cloudinary cleanup failed:', deleteError.message);
+        }
+      }
+
       next(e);
     }
   });
 });
 
+
 router.delete('/images/:imageId', async (req, res) => {
-  const [img] = await query('SELECT image_url FROM product_images WHERE id = ?', [Number(req.params.imageId)]);
-  if (!img) throw new HttpError(404, 'Image not found');
-  await query('DELETE FROM product_images WHERE id = ?', [Number(req.params.imageId)]);
-  removeUpload(img.image_url);
+  const [img] = await query(
+    'SELECT image_url FROM product_images WHERE id = ?',
+    [Number(req.params.imageId)]
+  );
+
+  if (!img) {
+    throw new HttpError(404, 'Image not found');
+  }
+
+  await query(
+    'DELETE FROM product_images WHERE id = ?',
+    [Number(req.params.imageId)]
+  );
+
+  await deleteImageByUrl(img.image_url);
+
   res.json({ ok: true });
 });
 
-function removeUpload(url) {
-  if (!url || !url.startsWith('/uploads/')) return;
-  const file = path.join(UPLOAD_DIR, path.basename(url));
-  fs.unlink(file, () => {});
-}
+
 
 // ---------- Orders & customers ----------
 router.get('/orders', async (req, res) => {
