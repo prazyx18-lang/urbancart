@@ -21,7 +21,13 @@ export async function api(path, { method = 'GET', body, form } = {}) {
 
   let res;
   try {
-    res = await fetch(`/api${path}`, { method, headers, body: payload });
+const API_URL = import.meta.env.VITE_API_URL || '';
+
+res = await fetch(`${API_URL}/api${path}`, {
+  method,
+  headers,
+  body: payload,
+});
   } catch {
     throw new ApiError('Cannot reach the server. Check your connection and try again.', 0);
   }
